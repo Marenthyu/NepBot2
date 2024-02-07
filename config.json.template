@@ -1,0 +1,20 @@
+{
+  "twitch": {
+    "eventsub": {
+      "secret": "",
+      "port": 8999,
+      "host": "",
+      "conduit_id": ""
+    },
+    "client_id": "6rm9gnxqvo42oprfnqx8b7hptqkfn9",
+    "client_secret": "",
+    "last_token": ""
+  },
+  "database": {
+    "host": "localhost",
+    "port": 3306,
+    "user": "nepbot",
+    "database": "nepbot",
+    "password": ""
+  }
+}
