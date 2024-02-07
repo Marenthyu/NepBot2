@@ -6,6 +6,7 @@ const fs = require("fs");
 const db = require("./database");
 const log = require('./logger');
 const commandprocessor = require('./commandprocessor');
+const twitch = require('./twitch');
 
 let token;
 
@@ -116,168 +117,18 @@ async function saveConfig() {
     return fs.writeFileSync('./config.json', JSON.stringify(config, null, 2));
 }
 
-async function verifyToken(token) {
-    let valid = false;
-    try {
-        let response = await fetch("https://id.twitch.tv/oauth2/validate", {headers: {"Authorization": "OAuth " + token}});
-        let j = await response.json();
-        valid = j.client_id === config.twitch.client_id;
-
-    } catch (e) {
-        log.error("Error verifying...");
-        log.error(e);
-        valid = false;
-    }
-    log.debug("Valid: " + valid);
-    return valid;
-}
-
-async function getAppAccessToken() {
-    try {
-        let params = new URLSearchParams();
-        params.set("client_id", config.twitch.client_id);
-        params.set("client_secret", config.twitch.client_secret);
-        params.set("grant_type", "client_credentials");
-        let response = await fetch("https://id.twitch.tv/oauth2/token", {
-            method: "POST",
-            body: params.toString(),
-            headers: {
-                "Content-Type": "application/x-www-form-urlencoded"
-            }
-        });
-        let j = await response.json();
-        log.debug({j});
-        return j.access_token;
-    } catch (e) {
-        log.error("Error generating new token...");
-        log.error(e);
-    }
-}
-
-async function getConduitDetails() {
-    try {
-        let response = await fetch("https://api.twitch.tv/helix/eventsub/conduits", {
-            headers: {
-                "Authorization": "Bearer " + token,
-                "Client-ID": config.twitch.client_id
-            }
-        });
-        let j = await response.json();
-        if (j.error) {
-            log.error(JSON.stringify(j.error));
-        }
-        let myConduit = j.data.filter((value, index) => {
-            return value.id === config.twitch.eventsub.conduit_id
-        });
-        return myConduit.length >= 1 ? myConduit[0] : [];
-    } catch (e) {
-        log.error("Error getting conduit details...");
-        log.error(e);
-        process.exit(4);
-    }
-}
-
-async function getConduitShards() {
-    let returnList = [];
-    try {
-        let response = await fetch("https://api.twitch.tv/helix/eventsub/conduits/shards?conduit_id=" + config.twitch.eventsub.conduit_id, {
-            headers: {
-                "Authorization": "Bearer " + token,
-                "Client-ID": config.twitch.client_id
-            }
-        });
-        let j = await response.json();
-        if (j.error) {
-            log.error(JSON.stringify(j));
-        }
-        returnList.push(...(j.data));
-        while (j.pagination.cursor) {
-            response = await fetch("https://api.twitch.tv/helix/eventsub/conduits/shards?conduit_id=" + config.twitch.eventsub.conduit_id + "&after=" + j.pagination.cursor, {
-                headers: {
-                    "Authorization": "Bearer " + token,
-                    "Client-ID": config.twitch.client_id
-                }
-            });
-            j = await response.json();
-            returnList.push(...(j.data));
-        }
-        return returnList;
-    } catch (e) {
-        log.error("Error getting conduit...");
-        log.error(e);
-        process.exit(3);
-        return [];
-    }
-}
-
-async function updateOwnShard(conduit_id, shard_id) {
-        try {
-            let response = await fetch("https://api.twitch.tv/helix/eventsub/conduits/shards", {
-                method: "PATCH",
-                headers: {
-                    "Authorization": "Bearer " + token,
-                    "Client-ID": config.twitch.client_id,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    "conduit_id": conduit_id,
-                    "shards": [
-                        {
-                            "id": shard_id,
-                            "transport": {
-                                "method": "webhook",
-                                "secret": config.twitch.eventsub.secret,
-                                "callback": "https://" + config.twitch.eventsub.host + "/twitch/callback"
-                            }
-                        }
-                    ]
-                })
-            });
-            let j = await response.json();
-            log.debug("Own Shard Update Response:");
-            log.debug(JSON.stringify(j));
-        } catch (e) {
-            log.error("Error updating own shard...");
-            log.error(e);
-        }
-}
-
-async function addShard(new_count){
-    try {
-        let response = await fetch("https://api.twitch.tv/helix/eventsub/conduits", {
-            method: "PATCH",
-            headers: {
-                "Authorization": "Bearer " + token,
-                "Client-ID": config.twitch.client_id,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                "id": config.twitch.eventsub.conduit_id,
-                "shard_count": new_count
-            })
-        });
-        let j = await response.json();
-        log.debug("Conduit Update response:");
-        log.debug(JSON.stringify(j));
-        return updateOwnShard(config.twitch.eventsub.conduit_id, new_count-1);
-    } catch (e) {
-        log.error("Error updating conduit...");
-        log.error(e);
-    }
-}
-
 async function init() {
     log.info("Initializing remaining stuff...");
     log.info("Checking if last token is valid...");
 
-    let valid = await verifyToken(config.twitch.last_token);
+    let valid = await twitch.auth.verifyToken(config.twitch.last_token);
     if (valid) {
         log.info("Token was valid, reusing!");
         token = config.twitch.last_token;
     } else {
         log.info("Token was invalid, generating new one...");
-        token = await getAppAccessToken();
-        valid = await verifyToken(token);
+        token = await twitch.auth.getAppAccessToken();
+        valid = await twitch.auth.verifyToken(token);
         if (!valid) {
             log.error("Freshly generated token not valid. ABORTING STARTUP");
             process.exit(1);
@@ -288,8 +139,12 @@ async function init() {
 
     log.info("Valid token gotten. Verifying conduit...");
 
-    let shards = await getConduitShards();
-    let conduit = await getConduitDetails();
+    let conduit = await twitch.conduit.getConduitDetails();
+    let shards = await twitch.conduit.getConduitShards();
+
+    log.debug("Shard Status:");
+    log.debug("Conduit: " + JSON.stringify(conduit, null, 2));
+    log.debug("Shards: " + JSON.stringify(shards, null, 2));
 
     log.info("Got Shards for Conduit, verifying my own status...");
 
@@ -306,7 +161,7 @@ async function init() {
                 case "webhook_callback_verification_failed":
                 case "notification_failures_exceeded": {
                     log.warn("Erroneous Shard Status. Recreating...");
-                    await updateOwnShard(config.twitch.eventsub.conduit_id, myID);
+                    await twitch.conduit.updateOwnShard(config.twitch.eventsub.conduit_id, myID);
                     break;
                 }
                 default: {
@@ -323,13 +178,13 @@ async function init() {
             // We have a brand new Conduit, need to just fill it.
             myID = 0;
         }
-        await addShard(myID+1);
+        await twitch.conduit.addShard(myID+1);
     }
     log.info("Initialization complete, we should now be listening to events!");
 }
 
 async function updateConfigsForModules(newconfig) {
-    return Promise.all([db.updateConfig(newconfig), commandprocessor.updateConfig(newconfig)]);
+    return Promise.all([db.updateConfig(newconfig), commandprocessor.updateConfig(newconfig), twitch.updateConfig(newconfig)]);
 }
 
 async function sendReply(incomingMessage, response) {
@@ -341,11 +196,14 @@ log.info("HELLO WORLD");
 log.info("Hi, I like Waifus. Let's get started.");
 log.info("Connecting to database...");
 db.init(config, log).then(() => {
-    log.info("Database Connected, Initializing Command Processor...");
+    log.info("Database Connected, Initializing Twitch...");
+    return twitch.init(config, db, log);
+}).then(() => {
+    log.info("Twitch Module initialized, starting Command Processor...");
     return commandprocessor.init(config, db, log);
 }).then(() => {
-   log.info("Commands Processing, starting EventSub Listener...");
-   return server.listen(config.twitch.eventsub.port);
+    log.info("Commands Processing, starting EventSub Listener...");
+    return server.listen(config.twitch.eventsub.port);
 }).then(init).then(() => {
     log.info("All done!");
 });
